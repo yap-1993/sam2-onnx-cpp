@@ -896,7 +896,7 @@ int runOnnxTestVideo(int argc, char** argv)
     const cv::Size inputSize(width, height);
 
     // Jetson Hardware-Accelerated H.264 GStreamer Pipeline
-    std::string outPipeline = "appsrc ! video/x-raw, format=BGR ! videoconvert ! video/x-raw, format=BGRx ! nvvidconv ! nvv4l2h264enc ! h264parse ! qtmux ! filesink location=/home/admin/assets/output_video.mp4";
+    std::string outPipeline = "appsrc ! video/x-raw, format=BGR ! videoconvert ! video/x-raw, format=BGRx ! nvvidconv ! nvv4l2h264enc ! h264parse ! qtmux ! filesink location=/home/admin/yap/sam2-onnx-cpp/vids/output_video.mp4";
 
     cv::VideoWriter writer(outPipeline,
                            cv::CAP_GSTREAMER,
