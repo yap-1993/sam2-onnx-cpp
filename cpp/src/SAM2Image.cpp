@@ -154,7 +154,12 @@ bool SAM2::restoreCachedEncoderOutputs(const CachedEncoderOutputs &outputs)
         return false;
     }
 
-    std::vector<Ort::Value> restored(static_cast<size_t>(requiredMaxIndex + 1));
+    size_t num_restored = static_cast<size_t>(requiredMaxIndex + 1);
+    std::vector<Ort::Value> restored;
+    restored.reserve(num_restored);
+    for (size_t i = 0; i < num_restored; ++i) {
+        restored.emplace_back(nullptr);
+    }
     if (!importTensor(m_cachedEncoderHostCopy.imageEmbed, &restored[static_cast<size_t>(m_encoderEmbedIndex)])
         || !importTensor(m_cachedEncoderHostCopy.currentVisionFeat, &restored[static_cast<size_t>(m_encoderCurrentVisionFeatIndex)])
         || !importTensor(m_cachedEncoderHostCopy.highRes0, &restored[static_cast<size_t>(m_encoderHighRes0Index)])

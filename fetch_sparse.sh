@@ -51,7 +51,7 @@ rm -rf sam2-sparse
 
 # Step 7: Convert line endings of download_ckpts.sh to Unix-style.
 echo "Converting line endings in download_ckpts.sh..."
-sed -i '' $'s/\r$//' checkpoints/download_ckpts.sh
+sed -i 's/\r$//' checkpoints/download_ckpts.sh
 # (On macOS, 'sed -i '' ' is needed to edit in-place without backup.
 #  If you are on Linux, you can do: sed -i 's/\r$//' ...)
 

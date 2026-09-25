@@ -494,3 +494,24 @@ Noninteractive image smoke test:
 ## License
 
 Apache License 2.0. See [LICENSE](LICENSE).
+
+
+## JETSON
+
+### Build
+
+cd cpp
+
+cmake -S . -B build_release
+
+cmake --build build_release --target Segment --clean-first
+
+### Run
+
+export SEG=cpp/build_release/bin/Segment
+export CKPT=checkpoints/base_plus
+
+$SEG --onnx_test_image --prompt seed_points --encoder "$CKPT/image_encoder.onnx" --decoder "$CKPT/image_decoder.onnx" --image imgs/traffic.jpg --no_gui --point 200,200 --save_overlay imgs/traffic_output.jpg 
+
+$SEG --onnx_test_video --prompt seed_points --max_frames 20 --device cuda --encoder "$CKPT/image_encoder.onnx" --decoder "$CKPT/image_decoder.onnx" --memattn "$CKPT/memory_attention.onnx" --memenc "$CKPT/memory_encoder.onnx" --video file:///home/admin/Downloads/data/test_video_track3.mp4 --no_gui --point 200,200 --save_overlay vids/output.mp4
+

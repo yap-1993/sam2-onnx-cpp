@@ -25,7 +25,8 @@ enum class PromptMode { SEED_POINTS, BOUNDING_BOX };
 struct AnchorEditorState
 {
     SAM2* sam = nullptr;
-    cv::VideoCapture* capture = nullptr;
+    // Remove this: cv::VideoCapture* capture;
+    std::vector<cv::Mat> frames;
     PromptMode mode = PromptMode::SEED_POINTS;
     int totalFrames = 0;
     int currentFrameIndex = 0;
@@ -147,7 +148,7 @@ int resolveFrameCount(cv::VideoCapture& cap, int maxFrames)
     return std::max(totalFrames, 1);
 }
 
-bool loadFrameAt(cv::VideoCapture& cap, int frameIndex, cv::Mat* frameOut)
+/*bool loadFrameAt(cv::VideoCapture& cap, int frameIndex, cv::Mat* frameOut)
 {
     cap.set(cv::CAP_PROP_POS_FRAMES, frameIndex);
     cv::Mat frame;
@@ -155,6 +156,13 @@ bool loadFrameAt(cv::VideoCapture& cap, int frameIndex, cv::Mat* frameOut)
         return false;
     }
     *frameOut = frame;
+    return true;
+}*/
+
+bool loadFrameAt(const std::vector<cv::Mat>& frames, int frameIndex, cv::Mat* frameOut)
+{
+    if (frameIndex < 0 || frameIndex >= frames.size()) return false;
+    *frameOut = frames[frameIndex].clone(); // or just reference it if you don't modify it
     return true;
 }
 
@@ -255,6 +263,7 @@ void loadCurrentPromptFromAnchor(AnchorEditorState* state)
 
 void storeCurrentPromptToAnchor(AnchorEditorState* state)
 {
+    std::cout << "[TRACE] store: building prompts" << std::endl;
     SAM2Prompts prompts = buildCurrentPrompts(*state);
 
     const bool hasPrompt =
@@ -262,16 +271,31 @@ void storeCurrentPromptToAnchor(AnchorEditorState* state)
         || !prompts.rects.empty();
 
     if (!hasPrompt) {
+        std::cout << "[TRACE] store: erasing empty prompt" << std::endl;
         state->anchors.erase(state->currentFrameIndex);
         state->anchorEncoderCaches.erase(state->currentFrameIndex);
         return;
     }
 
+    std::cout << "[TRACE] store: inserting prompts into map" << std::endl;
     state->anchors[state->currentFrameIndex] = std::move(prompts);
+    
+    std::cout << "[TRACE] store: capturing encoder outputs from SAM2" << std::endl;
+    // =========================================================================
+    // FIX: Disabled tensor caching!
+    // ONNX Runtime on this machine segfaults when trying to deep-copy CUDA tensors.
+    // By skipping this, we save RAM and prevent the crash. The final inference loop 
+    // will simply recalculate the encoder state automatically since the cache is empty.
+    // =========================================================================
+    
+    /*
     CachedEncoderOutputs cachedOutputs;
     if (state->sam->captureCachedEncoderOutputs(&cachedOutputs)) {
-        state->anchorEncoderCaches[state->currentFrameIndex] = std::move(cachedOutputs);
+        state->anchorEncoderCaches.erase(state->currentFrameIndex);
+        state->anchorEncoderCaches.emplace(state->currentFrameIndex, std::move(cachedOutputs));
     }
+    */
+    std::cout << "[TRACE] store: done" << std::endl;
 }
 
 bool preprocessCurrentFrame(AnchorEditorState* state)
@@ -307,6 +331,7 @@ void renderAnchorEditor(AnchorEditorState* state)
         shouldRun = state->hasFinalRect;
     }
 
+    // RUNS INFERENCE! (This prevents the segfault)
     if (shouldRun) {
         try {
             const SAM2Prompts prompts = buildCurrentPrompts(*state);
@@ -335,43 +360,48 @@ void renderAnchorEditor(AnchorEditorState* state)
             cv::circle(
                 state->displayFrame,
                 cv::Point(state->currentPoints[i].x, state->currentPoints[i].y),
-                5,
-                color,
-                -1);
+                5, color, -1);
         }
     } else if (state->drawing || state->hasFinalRect) {
         const SAM2Rect rect = normalizedRect(state->rect);
-        cv::rectangle(
-            state->displayFrame,
-            cv::Rect(rect.x, rect.y, rect.width, rect.height),
-            cv::Scalar(0, 255, 255),
-            2);
+        cv::rectangle(state->displayFrame, cv::Rect(rect.x, rect.y, rect.width, rect.height), cv::Scalar(0, 255, 255), 2);
     }
 
-    drawHud(
-        &state->displayFrame,
-        state->currentFrameIndex,
-        state->totalFrames,
-        state->anchors.size(),
-        state->mode);
-    cv::imshow(kWindowName, state->displayFrame);
+    drawHud(&state->displayFrame, state->currentFrameIndex, state->totalFrames, state->anchors.size(), state->mode);
+    
+    // --- HEADLESS FIX: Save to disk instead of cv::imshow ---
+    std::string debugImgPath = "headless_frame_" + std::to_string(state->currentFrameIndex) + ".jpg";
+    cv::imwrite(debugImgPath, state->displayFrame);
+    std::cout << "\n[Frame " << state->currentFrameIndex << "] Saved to " << debugImgPath << "\n";
 }
 
 bool gotoFrame(AnchorEditorState* state, int frameIndex)
 {
+    std::cout << "[TRACE] gotoFrame: Storing current prompt...\n";
     storeCurrentPromptToAnchor(state);
 
+    std::cout << "[TRACE] gotoFrame: Updating frame index...\n";
     state->currentFrameIndex = clampFrameIndex(frameIndex, state->totalFrames);
-    if (!loadFrameAt(*state->capture, state->currentFrameIndex, &state->currentFrame)) {
+    
+    std::cout << "[TRACE] gotoFrame: Loading frame " << state->currentFrameIndex << " from memory...\n";
+    if (!loadFrameAt(state->frames, state->currentFrameIndex, &state->currentFrame)) {
         std::cerr << "[ERROR] Could not read frame " << state->currentFrameIndex << '\n';
         return false;
     }
+    
+    std::cout << "[TRACE] gotoFrame: Preprocessing frame (SAM2)...\n";
     if (!preprocessCurrentFrame(state)) {
+        std::cerr << "[ERROR] Preprocessing failed.\n";
         return false;
     }
 
+    std::cout << "[TRACE] gotoFrame: Loading prompt from anchor...\n";
     loadCurrentPromptFromAnchor(state);
-    renderAnchorEditor(state);
+    
+    std::cout << "[TRACE] gotoFrame: Rendering editor...\n";
+    renderAnchorEditor(state); 
+    
+    std::cout << "[TRACE] gotoFrame: Done.\n";
     return true;
 }
 
@@ -448,7 +478,7 @@ void onMouseAnchorEditor(int event, int x, int y, int, void* userData)
     }
 }
 
-bool collectAnchorPrompts(SAM2* sam,
+/*bool collectAnchorPrompts(SAM2* sam,
                           const std::string& videoPath,
                           PromptMode mode,
                           int maxFrames,
@@ -456,7 +486,10 @@ bool collectAnchorPrompts(SAM2* sam,
                           std::map<int, CachedEncoderOutputs>* anchorEncoderCachesOut,
                           int* totalFramesOut)
 {
-    cv::VideoCapture capture(videoPath);
+    std::string pipeline = "uridecodebin uri=file://" + videoPath +
+                        " ! nvvidconv ! video/x-raw, format=BGRx ! videoconvert ! video/x-raw, format=BGR ! appsink";
+
+    cv::VideoCapture capture(pipeline, cv::CAP_GSTREAMER);
     if (!capture.isOpened()) {
         std::cerr << "[ERROR] Cannot open video for anchor selection.\n";
         return false;
@@ -518,6 +551,126 @@ bool collectAnchorPrompts(SAM2* sam,
         *anchorEncoderCachesOut = std::move(state.anchorEncoderCaches);
     }
     *totalFramesOut = totalFrames;
+    return true;
+}*/
+
+bool collectAnchorPrompts(SAM2* sam,
+                          const std::string& uri,
+                          PromptMode mode,
+                          int maxFrames,
+                          std::map<int, SAM2Prompts>* anchorsOut,
+                          std::map<int, CachedEncoderOutputs>* anchorEncoderCachesOut,
+                          int* totalFramesOut,
+                          std::vector<cv::Mat>* framesOut)
+{
+    std::string pipeline = "uridecodebin uri=" + uri +
+                           " ! nvvidconv ! video/x-raw, format=BGRx ! videoconvert ! video/x-raw, format=BGR ! appsink drop=1";
+
+    cv::VideoCapture capture(pipeline, cv::CAP_GSTREAMER);
+    if (!capture.isOpened()) {
+        std::cerr << "[ERROR] Cannot open video for anchor selection.\n";
+        return false;
+    }
+
+    std::cout << "[INFO] Loading video into memory...\n";
+    std::vector<cv::Mat> cachedFrames;
+    cv::Mat temp;
+    while (capture.read(temp)) {
+        if (temp.empty()) break;
+        cachedFrames.push_back(temp.clone());
+        if (maxFrames > 0 && cachedFrames.size() >= static_cast<size_t>(maxFrames)) break;
+    }
+    
+    // CRITICAL FIX: Do NOT call capture.release() here. 
+    // Destroying GStreamer early can tear down the CUDA context that ONNX is using.
+
+    const int totalFrames = cachedFrames.size();
+    if (totalFrames <= 0) return false;
+
+    AnchorEditorState state;
+    state.sam = sam;
+    state.frames = cachedFrames;
+    state.mode = mode;
+    state.totalFrames = totalFrames;
+    state.currentFrameIndex = 0;
+
+    if (!loadFrameAt(state.frames, 0, &state.currentFrame)) return false;
+    if (!preprocessCurrentFrame(&state)) return false;
+
+    std::cout << "\n[INFO] HEADLESS MODE ACTIVE.\n";
+    std::cout << "Commands:\n"
+              << "  a / d : Prev/Next frame\n"
+              << "  j / l : Jump -/+ 10 frames\n"
+              << "  c     : Clear current prompt\n"
+              << "  q     : Quit and save annotations\n"
+              << "  p X Y LABEL : Add point (LABEL: 1=positive, 0=negative)\n";
+
+    renderAnchorEditor(&state);
+
+    while (true) {
+        std::cout << "Enter command> ";
+
+        std::string inputLine;
+        if (!std::getline(std::cin, inputLine)) break;
+        if (inputLine.empty()) continue;
+
+        std::stringstream ss(inputLine);
+        std::string cmd;
+        ss >> cmd;
+
+        if (cmd == "q" || cmd == "Q") {
+            storeCurrentPromptToAnchor(&state);
+            break;
+        } else if (cmd == "a" || cmd == "A") {
+            gotoFrame(&state, state.currentFrameIndex - 1);
+        } else if (cmd == "d" || cmd == "D") {
+            gotoFrame(&state, state.currentFrameIndex + 1);
+        } else if (cmd == "j" || cmd == "J") {
+            gotoFrame(&state, state.currentFrameIndex - kJumpFrames);
+        } else if (cmd == "l" || cmd == "L") {
+            gotoFrame(&state, state.currentFrameIndex + kJumpFrames);
+        } else if (cmd == "c" || cmd == "C") {
+            clearCurrentPrompt(&state);
+            storeCurrentPromptToAnchor(&state);
+            renderAnchorEditor(&state);
+    } else if (cmd == "p" || cmd == "P") {
+            float x, y;
+            int label;
+            if (ss >> x >> y >> label) {
+                std::cout << "[TRACE] Command P: Clamping point" << std::endl;
+                // Use state directly (it's passed by reference)
+                const SAM2Point point = clampPointToFrame(state, x, y);
+                
+                // Use dot operator since state is an object
+                state.currentPoints.push_back(point);
+                state.currentLabels.push_back(label);
+                
+                std::cout << "[TRACE] Command P: Calling storeCurrentPromptToAnchor" << std::endl;
+                // Pass the memory address (&state) to functions expecting a pointer
+                storeCurrentPromptToAnchor(&state);
+                
+                std::cout << "[TRACE] Command P: Rendering frame" << std::endl;
+                renderAnchorEditor(&state); 
+                
+                std::cout << "Added point (" << x << ", " << y << ") label=" << label << std::endl;
+            } else {
+                std::cout << "[ERROR] Invalid format. Use: p X Y LABEL (e.g., p 150 200 1)" << std::endl;
+            }
+        }
+    }
+
+    *anchorsOut = std::move(state.anchors);
+    if (anchorEncoderCachesOut) {
+        *anchorEncoderCachesOut = std::move(state.anchorEncoderCaches);
+    }
+    *totalFramesOut = totalFrames;
+    
+    if (framesOut) {
+        *framesOut = std::move(state.frames); // <--- EXPORT CACHED FRAMES
+    }
+    // NOW it is safe to release the video pipeline.
+    capture.release();
+    
     return true;
 }
 
@@ -708,6 +861,8 @@ int runOnnxTestVideo(int argc, char** argv)
     std::map<int, SAM2Prompts> anchors;
     std::map<int, CachedEncoderOutputs> anchorEncoderCaches;
     int totalFrames = 0;
+    std::vector<cv::Mat> videoFrames;
+
     if (!collectAnchorPrompts(
             &sam,
             videoPath,
@@ -715,7 +870,8 @@ int runOnnxTestVideo(int argc, char** argv)
             maxFrames,
             &anchors,
             &anchorEncoderCaches,
-            &totalFrames)) {
+            &totalFrames,
+            &videoFrames)) {
         return 1;
     }
     if (anchors.empty()) {
@@ -728,32 +884,28 @@ int runOnnxTestVideo(int argc, char** argv)
         std::cout << ' ' << entry.first;
     }
     std::cout << "\n";
-
-    cv::VideoCapture cap(videoPath);
-    if (!cap.isOpened()) {
-        std::cerr << "[ERROR] Cannot reopen video for processing.\n";
+    
+    if (videoFrames.empty()) {
+        std::cerr << "[ERROR] No video frames loaded in memory.\n";
         return 1;
     }
 
-    const double fpsRaw = cap.get(cv::CAP_PROP_FPS);
-    const double fps = fpsRaw > 0.0 ? fpsRaw : 25.0;
-    const int width = static_cast<int>(cap.get(cv::CAP_PROP_FRAME_WIDTH));
-    const int height = static_cast<int>(cap.get(cv::CAP_PROP_FRAME_HEIGHT));
-    if (width <= 0 || height <= 0) {
-        std::cerr << "[ERROR] Could not determine video resolution.\n";
-        return 1;
-    }
+    const double fps = 25.0;
+    const int width = videoFrames[0].cols;
+    const int height = videoFrames[0].rows;
+    const cv::Size inputSize(width, height);
 
-    const size_t dot = videoPath.find_last_of('.');
-    const std::string stem = dot == std::string::npos ? videoPath : videoPath.substr(0, dot);
-    const std::string outVideo = stem + "_" + selectedRuntimeMode + "_mask_overlay.avi";
-    cv::VideoWriter writer(
-        outVideo,
-        cv::VideoWriter::fourcc('M', 'J', 'P', 'G'),
-        fps,
-        cv::Size(width, height));
+    // Jetson Hardware-Accelerated H.264 GStreamer Pipeline
+    std::string outPipeline = "appsrc ! video/x-raw, format=BGR ! videoconvert ! video/x-raw, format=BGRx ! nvvidconv ! nvv4l2h264enc ! h264parse ! qtmux ! filesink location=/home/admin/assets/output_video.mp4";
+
+    cv::VideoWriter writer(outPipeline,
+                           cv::CAP_GSTREAMER,
+                           0,
+                           fps,
+                           inputSize);
+
     if (!writer.isOpened()) {
-        std::cerr << "[ERROR] Could not open output writer.\n";
+        std::cerr << "[ERROR] Could not open output writer with GStreamer pipeline.\n";
         return 1;
     }
 
@@ -764,10 +916,7 @@ int runOnnxTestVideo(int argc, char** argv)
     int writtenFrames = 0;
 
     for (int frameIndex = 0; frameIndex < totalFrames; ++frameIndex) {
-        cv::Mat frameBGR;
-        if (!cap.read(frameBGR) || frameBGR.empty()) {
-            break;
-        }
+        const cv::Mat& frameBGR = videoFrames[frameIndex];
 
         const auto anchorIt = anchors.find(frameIndex);
         if (anchorIt != anchors.end()) {
@@ -800,11 +949,11 @@ int runOnnxTestVideo(int argc, char** argv)
             frameBGR,
             CVHelpers::imageToCvMatWithType(mask, CV_8UC1, 255.0));
         ++writtenFrames;
+        std::cout << "[INFO] Frame " << frameIndex << " processed and written\n";
     }
 
     writer.release();
-    cap.release();
 
-    std::cout << "[INFO] Saved " << outVideo << " (" << writtenFrames << " frames)\n";
+    std::cout << "[INFO] Saved /home/admin/assets/output_video.mp4 (" << writtenFrames << " frames)\n";
     return 0;
 }
